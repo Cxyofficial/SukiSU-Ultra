@@ -126,6 +126,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Calculate version code
         id: version
@@ -199,6 +200,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
 
       # --------------------------------------------------------
@@ -527,6 +529,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
 
       # --------------------------------------------------------
@@ -754,6 +757,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
       - uses: actions/download-artifact@v8
         with:
           name: Manager
@@ -845,6 +849,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
 
       # --------------------------------------------------------
