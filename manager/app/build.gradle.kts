@@ -277,7 +277,9 @@ val downloadKpmTools = tasks.register("downloadKpmTools") {
         val baseUrl = "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm"
         val downloads = listOf("kptools", "kpimg").associateWith { name ->
             val target = temporaryDir.resolve(name)
-            val url = "$baseUrl/$name"
+            // 上游已将 kptools 资产改名为 kptools-android，旧名会 404
+            val remoteName = if (name == "kptools") "kptools-android" else name
+            val url = "$baseUrl/$remoteName"
             try {
                 val connection = URI(url).toURL().openConnection() as HttpURLConnection
                 try {
