@@ -71,7 +71,7 @@ jobs:
       key_alias: ${{ github.event_name == 'pull_request' && steps.gen.outputs.key_alias || steps.gen_prod.outputs.key_alias }}
     steps:
       - name: Generate temporary keystore
-        if: github.event_name == 'pull_request'
+        if: always()
         id: gen
         run: |
           KEYSTORE_PASSWORD=$(openssl rand -hex 32)
@@ -103,7 +103,14 @@ jobs:
           PROD_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           PROD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          test -n "$PROD_KEYSTORE"
+          if [ -z "$PROD_KEYSTORE" ]; then
+            echo "未配置正式 keystore，沿用临时密钥"
+            echo "keystore=${{ steps.gen.outputs.keystore }}" >> $GITHUB_OUTPUT
+            echo "keystore_password=${{ steps.gen.outputs.keystore_password }}" >> $GITHUB_OUTPUT
+            echo "key_password=${{ steps.gen.outputs.key_password }}" >> $GITHUB_OUTPUT
+            echo "key_alias=pr-key" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           test -n "$PROD_KEYSTORE_PASSWORD"
           test -n "$PROD_KEY_ALIAS"
           test -n "$PROD_KEY_PASSWORD"
@@ -121,14 +128,11 @@ jobs:
           PROD_STORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
           PROD_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
+          if [ "$EVENT_NAME" = "pull_request" ] || [ -z "$PROD_KEYSTORE" ]; then
             KEYSTORE_FILE=pr-key.jks
             KEY_ALIAS=pr-key
             STORE_PASS="$PR_STORE_PASS"
           else
-            test -n "$PROD_KEYSTORE"
-            test -n "$PROD_STORE_PASS"
-            test -n "$PROD_KEY_ALIAS"
             echo "$PROD_KEYSTORE" | base64 -d > key.jks
             KEYSTORE_FILE=key.jks
             KEY_ALIAS="$PROD_KEY_ALIAS"
@@ -162,6 +166,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Calculate version code
         id: version
@@ -244,6 +249,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
 
       # --------------------------------------------------------
@@ -335,7 +341,7 @@ jobs:
 
 
       - name: Write PR key
-        if: github.event_name == 'pull_request'
+        if: always()
 
         env:
           PR_KEYSTORE: ${{ needs.generate-key.outputs.keystore }}
@@ -343,6 +349,11 @@ jobs:
           PR_KEY_PASSWORD: ${{ needs.generate-key.outputs.key_password }}
 
         run: |
+          if [ -n "${{ secrets.KEYSTORE }}" ]; then
+            echo "已配置正式 keystore，跳过临时密钥写入"
+            exit 0
+          fi
+          test -n "$PR_KEYSTORE"
           echo "$PR_KEYSTORE" | base64 -d > pr-key.jks
 
           {
@@ -560,6 +571,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
 
       # --------------------------------------------------------
@@ -694,8 +706,9 @@ jobs:
           PROD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ -z "$PROD_KEYSTORE" ]; then
 
+            test -n "$PR_KEYSTORE"
             echo "$PR_KEYSTORE" | base64 -d > pr-key.jks
 
             echo "SIGN_KEYSTORE_FILE=pr-key.jks" >> "$GITHUB_ENV"
@@ -704,8 +717,6 @@ jobs:
             echo "SIGN_KEY_PASSWORD=$PR_KEY_PASSWORD" >> "$GITHUB_ENV"
 
           else
-
-            test -n "$PROD_KEYSTORE"
 
             echo "$PROD_KEYSTORE" | base64 -d > key.jks
 
@@ -783,6 +794,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
       - uses: actions/download-artifact@v8
         with:
           name: Manager
@@ -873,6 +885,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
 
       # --------------------------------------------------------
