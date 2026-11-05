@@ -75,6 +75,7 @@ fun InstallScreen(
     var allowShell by rememberSaveable { mutableStateOf(false) }
     var enableAdb by rememberSaveable { mutableStateOf(false) }
     var forceBackup by rememberSaveable { mutableStateOf(false) }
+    var selectedBootImageKind by rememberSaveable { mutableStateOf<String?>(null) }
     var kpmPatchOption by rememberSaveable { mutableStateOf(KpmPatchOption.FOLLOW_KERNEL) }
     val kpmEnabled = kpmPatchOption.enabled
     val kpmUndo = kpmPatchOption.undo
@@ -144,7 +145,7 @@ fun InstallScreen(
         }
     }
 
-    // AnyKernel3 状�?
+    // AnyKernel3 状�?
     val anyKernel3State = rememberAnyKernel3State(
         installMethodState = installMethodState,
         preselectedKernelUri = preselectedKernelUri?.toString(),
@@ -154,7 +155,7 @@ fun InstallScreen(
 
     val showSlotSelectionDialog = anyKernel3State.showSlotSelectionDialog && isAbDevice
 
-    // 槽位选择对话�?
+    // 槽位选择对话�?
     if (showSlotSelectionDialog) {
         SlotSelectionDialog(
             show = true,
@@ -248,6 +249,7 @@ fun InstallScreen(
                                     lkm = lkmSelection,
                                     ota = isOta,
                                     partition = partitions.getOrNull(partitionSelectionIndex),
+                                    bootImageKind = selectedBootImageKind,
                                     allowShell = allowShell,
                                     enableAdb = enableAdb,
                                     backup = method is InstallMethod.SelectFile && forceBackup,
@@ -263,8 +265,12 @@ fun InstallScreen(
         }
     }
 
+    val preferredKmi = currentKmi.takeIf { it.isNotBlank() }
+
     ChooseKmiDialog(
         show = showChooseKmiDialog.value,
+        preferredKmi = preferredKmi,
+        currentKmi = currentKmi,
         onDismissRequest = { showChooseKmiDialog.value = false },
         onSelected = { kmi ->
             kmi?.let {
@@ -323,12 +329,31 @@ fun InstallScreen(
             }
         }
     }
+
+    val continueInstall: () -> Unit = {
+        val method = installMethod
+        val isLkmSelected = lkmSelection != LkmSelection.KmiNone
+        val isKmiUnknown = currentKmi.isBlank()
+        val selectedPartition = partitions.getOrNull(partitionSelectionIndex)
+        val isVendorBoot = isVendorBootTarget(selectedBootImageKind, selectedPartition)
+        val isKmiUnresolved = when (method) {
+            is InstallMethod.DownloadFile -> false
+            is InstallMethod.SelectFile -> true
+            else -> isKmiUnknown
+        }
+        if (isGkiDevice && !isLkmSelected && isKmiUnresolved && !isVendorBoot && method !is InstallMethod.HorizonKernel) {
+            showChooseKmiDialog.value = true
+        } else {
+            onInstall()
+        }
+    }
     val selectImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        val uri = it.data?.data
-        if (it.resultCode != Activity.RESULT_OK || uri == null) {
+    ) { result ->
+        val uri = result.data?.data
+        if (result.resultCode != Activity.RESULT_OK || uri == null) {
             installMethod = null
+            selectedBootImageKind = null
             return@rememberLauncherForActivityResult
         }
         val option = when (installMethod) {
@@ -338,7 +363,9 @@ fun InstallScreen(
         }
         option?.let { opt ->
             installMethod = opt
-            // 对于 HorizonKernel，需要触�?AnyKernel3 流程（槽位选择和KPM修补�?
+            selectedBootImageKind = null
+            // 对于 HorizonKernel，需要触发 AnyKernel3 流程（槽位选择和KPM修补）
+
             if (opt is InstallMethod.HorizonKernel) {
                 anyKernel3State.onHorizonKernelSelected(opt)
             }
@@ -387,6 +414,7 @@ fun InstallScreen(
     val actions = InstallScreenActions(
         onBack = dropUnlessResumed { navigator.pop() },
         onSelectMethod = { method ->
+            selectedBootImageKind = null
             if (method is InstallMethod.HorizonKernel && method.uri != null) {
                 anyKernel3State.onHorizonKernelSelected(method)
             } else {
@@ -395,8 +423,9 @@ fun InstallScreen(
         },
         onDownloadFile = { downloadDialogShown = true },
         onSelectBootImage = { method ->
-            // 在打开文件选择器之前，先设�?installMethod
+            // 在打开文件选择器之前，先设�?installMethod
             installMethod = method
+            selectedBootImageKind = null
             selectImageLauncher.launch(Intent(Intent.ACTION_GET_CONTENT).apply {
                 type = "application/*"
                 putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/octet-stream", "application/zip"))
@@ -417,19 +446,38 @@ fun InstallScreen(
             }
         },
         onNext = {
-            val isLkmSelected = lkmSelection != LkmSelection.KmiNone
-            val isKmiUnknown = currentKmi.isBlank()
-            val isKmiUnresolved = when (installMethod) {
-                // The download flow extracts the KMI itself; no manual
-                // selection needed.
-                is InstallMethod.DownloadFile -> false
-                is InstallMethod.SelectFile -> true
-                else -> isKmiUnknown
-            }
-            if (!isStandaloneKpm && isGkiDevice && !isLkmSelected && isKmiUnresolved && installMethod !is InstallMethod.HorizonKernel) {
-                showChooseKmiDialog.value = true
-            } else {
+            val method = installMethod
+            if (isStandaloneKpm || method is InstallMethod.HorizonKernel) {
                 onInstall()
+            } else if (method is InstallMethod.DownloadFile) {
+                if (!isSupportedBootImageKind(method.partition)) {
+                    showMessage(resources.getString(R.string.install_only_support_boot_family_partition))
+                } else {
+                    continueInstall()
+                }
+            } else if (method is InstallMethod.SelectFile && selectedBootImageKind == null) {
+                scope.launch {
+                    val imageKind = classifyBootImage(method.uri)
+                    selectedBootImageKind = imageKind
+                    if (!isSupportedBootImageKind(imageKind)) {
+                        showMessage(resources.getString(R.string.install_only_support_boot_family_image))
+                    } else {
+                        continueInstall()
+                    }
+                }
+            } else {
+                val selectedPartition = partitions.getOrNull(partitionSelectionIndex)
+                if (method is InstallMethod.SelectFile) {
+                    if (!isSupportedBootImageKind(selectedBootImageKind)) {
+                        showMessage(resources.getString(R.string.install_only_support_boot_family_image))
+                    } else {
+                        continueInstall()
+                    }
+                } else if (!isSupportedBootImageKind(selectedPartition)) {
+                    showMessage(resources.getString(R.string.install_only_support_boot_family_partition))
+                } else {
+                    continueInstall()
+                }
             }
         },
         onAdvancedOptionsClicked = {
@@ -456,7 +504,7 @@ fun InstallScreen(
         onSpoofEnabledChange = {
             spoofEnabled = it
             if (!it) {
-                // 关闭开关时清空已填写的�?
+                // 关闭开关时清空已填写的�?
                 spoofRelease = ""
                 spoofVersion = ""
                 scope.launch {

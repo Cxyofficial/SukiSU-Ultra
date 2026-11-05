@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use android_logger::Config;
 use log::{LevelFilter, error, info};
 
-use crate::boot_patch::{BootPatchArgs, BootRestoreArgs};
+use crate::boot_patch::{BootPatchArgs, BootRestoreArgs, VendorBootRmvrArgs};
 use crate::lkm_image::BootPatchV2Args;
 use crate::module::regenerate_preinit;
 #[cfg(target_arch = "aarch64")]
@@ -138,6 +138,9 @@ enum Commands {
     /// Patch boot or init_boot images to apply KernelSU
     BootPatch(BootPatchArgs),
 
+    /// Remove conflicting prebuilt modules from vendor_boot
+    BootPatchRmvr(VendorBootRmvrArgs),
+
     /// Restore boot or init_boot images patched by KernelSU
     BootRestore(BootRestoreArgs),
 
@@ -218,6 +221,9 @@ enum BootInfo {
 
     /// show supported kmi versions
     SupportedKmis,
+
+    /// classify an image as boot / init_boot / vendor_boot
+    ClassifyImage { image: PathBuf },
 
     /// check if device is A/B capable
     IsAbDevice,
@@ -1299,6 +1305,7 @@ pub fn run() -> Result<()> {
         },
 
         Commands::BootPatch(boot_patch) => crate::boot_patch::patch(boot_patch),
+        Commands::BootPatchRmvr(rmvr) => crate::boot_patch::patch_rmvr(rmvr),
 
         Commands::BootInfo { command } => match command {
             BootInfo::CurrentKmi => {
@@ -1312,6 +1319,11 @@ pub fn run() -> Result<()> {
                 for kmi in &kmi {
                     println!("{kmi}");
                 }
+                return Ok(());
+            }
+            BootInfo::ClassifyImage { image } => {
+                let kind = crate::boot_patch::classify_image(&image)?;
+                println!("{kind}");
                 return Ok(());
             }
             BootInfo::IsAbDevice => {

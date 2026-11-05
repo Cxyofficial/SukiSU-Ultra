@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/build-manager.yml'
       - '.github/workflows/build-lkm.yml'
+      - '.github/workflows/build-lkm-vivo.yml'
       - '.github/workflows/ddk-lkm.yml'
       - '.github/workflows/ksud.yml'
       - '.github/workflows/ksud-extra.yml'
@@ -27,6 +28,7 @@ on:
     paths:
       - '.github/workflows/build-manager.yml'
       - '.github/workflows/build-lkm.yml'
+      - '.github/workflows/build-lkm-vivo.yml'
       - '.github/workflows/ddk-lkm.yml'
       - '.github/workflows/ksud.yml'
       - '.github/workflows/ksud-extra.yml'
@@ -149,12 +151,23 @@ jobs:
       release_build: ${{ inputs.release_build || github.ref_type == 'tag' }}
     secrets: inherit
 
+  build-lkm-vivo:
+    needs: [generate-key, determine-version]
+    uses: ./.github/workflows/build-lkm-vivo.yml
+    with:
+      expected_size: ${{ needs.generate-key.outputs.expected_size || '' }}
+      expected_hash: ${{ needs.generate-key.outputs.expected_hash || '' }}
+      version_code: ${{ needs.determine-version.outputs.version_code }}
+      release_build: ${{ inputs.release_build || github.ref_type == 'tag' }}
+    secrets: inherit
+
+
   build-ksuinit:
     uses: ./.github/workflows/ksuinit.yml
 
 
   build-ksud:
-    needs: [build-lkm, build-ksuinit]
+    needs: [build-lkm, build-lkm-vivo, build-ksuinit]
 
     strategy:
       fail-fast: false

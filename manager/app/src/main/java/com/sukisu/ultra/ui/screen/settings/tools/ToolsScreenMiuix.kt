@@ -213,3 +213,212 @@ private fun AllowlistBackupSectionMiuix(
         )
     }
 }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SpoofCpuDialogMiuix(
+    currentCpuInfo: CpuInfo?,
+    onDismiss: () -> Unit,
+    onApply: (SpoofCpuParams) -> Unit,
+    onRestore: () -> Unit
+) {
+    var selectedPreset by remember { mutableStateOf("custom") }
+    var midrValue by remember { mutableStateOf(currentCpuInfo?.midrHex ?: "0x0") }
+    var bogomipsValue by remember { mutableStateOf(currentCpuInfo?.bogomips?.toString() ?: "0") }
+    var hwcapValue by remember { mutableStateOf(currentCpuInfo?.hwcap ?: "0x0") }
+    var hwcap2Value by remember { mutableStateOf(currentCpuInfo?.hwcap2 ?: "0x0") }
+    val coreCount = currentCpuInfo?.coreCount ?: 8
+    var selectedCores by remember { mutableStateOf((0 until coreCount).toList()) }
+    val showDialogState = remember { mutableStateOf(true) }
+    var advancedExpanded by remember { mutableStateOf(false) }
+
+    val presetList = spoofCpuPresetList()
+    val presetLabels = presetList.map { preset ->
+        preset.coreTypeRes?.let { stringResource(it, preset.model) }
+            ?: stringResource(R.string.spoof_cpu_midr_custom)
+    }
+
+    if (showDialogState.value) {
+        OverlayDialog(
+            show = showDialogState.value,
+            title = stringResource(R.string.spoof_cpu_dialog_title),
+            onDismissRequest = {
+                showDialogState.value = false
+                onDismiss()
+            },
+            content = {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 警告提示
+                    TextButton(
+                        text = stringResource(R.string.spoof_cpu_restore),
+                        onClick = onRestore,
+                        enabled = currentCpuInfo != null,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                        cornerRadius = 8.dp
+                    )
+
+                    Text(
+                        text = stringResource(R.string.spoof_cpu_warning),
+                        color = colorScheme.error,
+                        style = textStyles.body2
+                    )
+
+                    Text(
+                        text = stringResource(R.string.spoof_cpu_field_midr),
+                        color = colorScheme.onSurfaceVariantSummary,
+                        style = textStyles.body2
+                    )
+
+                    OverlayDropdownPreference(
+                        title = stringResource(R.string.spoof_cpu_midr_preset_label),
+                        summary = presetLabels.getOrElse(presetList.indexOfFirst { it.id == selectedPreset }) { "" },
+                        items = presetLabels,
+                        selectedIndex = presetList.indexOfFirst { it.id == selectedPreset }.coerceAtLeast(0),
+                        onSelectedIndexChange = { index ->
+                            val preset = presetList[index]
+                            selectedPreset = preset.id
+                            if (preset.midrHex != "custom") {
+                                midrValue = preset.midrHex
+                            }
+                        }
+                    )
+
+                    // MIDR 输入
+                    TextField(
+                        value = midrValue,
+                        onValueChange = {
+                            midrValue = it
+                            selectedPreset = "custom"
+                        },
+                        label = stringResource(R.string.spoof_cpu_field_midr),
+                        useLabelAsPlaceholder = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(stringResource(R.string.spoof_cpu_field_cores), style = textStyles.body1)
+                        TextButton(
+                            text = stringResource(R.string.spoof_cpu_cores_all),
+                            colors = if (selectedCores.size == coreCount) {
+                                ButtonDefaults.textButtonColorsPrimary()
+                            } else {
+                                ButtonDefaults.textButtonColors()
+                            },
+                            onClick = {
+                                selectedCores = if (selectedCores.size == coreCount) emptyList() else (0 until coreCount).toList()
+                            }
+                        )
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        repeat(coreCount) { index ->
+                            val selected = index in selectedCores
+                            TextButton(
+                                text = stringResource(R.string.spoof_cpu_cores_format, index),
+                                colors = if (selected) {
+                                    ButtonDefaults.textButtonColorsPrimary()
+                                } else {
+                                    ButtonDefaults.textButtonColors()
+                                },
+                                onClick = {
+                                    selectedCores = if (selected) selectedCores - index else selectedCores + index
+                                },
+                                modifier = Modifier
+                                    .heightIn(min = 40.dp)
+                                    .semantics { this.selected = selected },
+                                cornerRadius = 20.dp
+                            )
+                        }
+                    }
+
+                    TextButton(
+                        text = stringResource(R.string.spoof_cpu_advanced),
+                        colors = if (advancedExpanded) {
+                            ButtonDefaults.textButtonColorsPrimary()
+                        } else {
+                            ButtonDefaults.textButtonColors()
+                        },
+                        onClick = { advancedExpanded = !advancedExpanded }
+                    )
+
+                    if (advancedExpanded) {
+                        TextField(
+                            value = bogomipsValue,
+                            onValueChange = { bogomipsValue = it },
+                            label = stringResource(R.string.spoof_cpu_field_bogomips),
+                            useLabelAsPlaceholder = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        TextField(
+                            value = hwcapValue,
+                            onValueChange = { hwcapValue = it },
+                            label = stringResource(R.string.spoof_cpu_field_hwcap),
+                            useLabelAsPlaceholder = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        TextField(
+                            value = hwcap2Value,
+                            onValueChange = { hwcap2Value = it },
+                            label = stringResource(R.string.spoof_cpu_field_hwcap2),
+                            useLabelAsPlaceholder = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    // 按钮
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        TextButton(
+                            text = stringResource(R.string.spoof_cpu_cancel),
+                            onClick = {
+                                showDialogState.value = false
+                                onDismiss()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .padding(vertical = 8.dp),
+                            cornerRadius = 8.dp
+                        )
+                        TextButton(
+                            text = stringResource(R.string.spoof_cpu_apply),
+                            colors = ButtonDefaults.textButtonColorsPrimary(),
+                            onClick = {
+                                val params = SpoofCpuParams(
+                                    cpuIndices = selectedCores,
+                                    midrHex = midrValue,
+                                    bogomips = bogomipsValue.toIntOrNull() ?: 0,
+                                    hwcapHex = hwcapValue,
+                                    hwcap2Hex = hwcap2Value
+                                )
+                                showDialogState.value = false
+                                onApply(params)
+                            },
+                            enabled = selectedCores.isNotEmpty(),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .padding(vertical = 8.dp),
+                            cornerRadius = 8.dp
+                        )
+                    }
+                }
+            }
+        )
+    }
+}
+

@@ -101,5 +101,9 @@ jobs:
             Manager/*.apk
             Manager-spoofed/*.apk
             lkm/lkm-*_kernelsu.ko
+            AnyKernel3-*.zip
+            boot-images-*/Image-*/*.img.gz
+            kernel-WSA*.zip
+            kernel-ARCVM*.zip
             ksud/ksud-*
             ksuinit/*

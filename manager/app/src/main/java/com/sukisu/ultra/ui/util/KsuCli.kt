@@ -624,6 +624,7 @@ fun installBoot(
     lkm: LkmSelection,
     ota: Boolean,
     partition: String?,
+    bootImageKind: String?,
     allowShell: Boolean,
     enableAdb: Boolean,
     forceBackup: Boolean,
@@ -638,7 +639,7 @@ fun installBoot(
     outputDir: File? = null,
 ): FlashResult {
     if (kpmEnabled) return installBootWithKpm(
-        bootUri, lkm, ota, partition, allowShell, enableAdb, forceBackup,
+        bootUri, lkm, ota, partition, bootImageKind, allowShell, enableAdb, forceBackup,
         blockModules, spoofRelease, spoofVersion, kpmBoot, onStdout, onStderr, kpmUndo,
     )
     val resolver = ksuApp.contentResolver
@@ -654,7 +655,16 @@ fun installBoot(
         }
     }
 
-    var cmd = "boot-patch"
+    val useVendorBootRmvr = isVendorBootTarget(bootImageKind, partition)
+    if (useVendorBootRmvr && lkm != LkmSelection.KmiNone) {
+        onStdout(ksuApp.getString(R.string.vendor_boot_rmvr_lkm_not_used))
+    }
+
+    var cmd = if (useVendorBootRmvr) {
+        VENDOR_BOOT_RMVR_COMMAND
+    } else {
+        BOOT_PATCH_COMMAND
+    }
 
     cmd += if (bootFile == null) {
         // no boot.img, use -f to flash
@@ -662,20 +672,22 @@ fun installBoot(
     } else {
         " -b ${bootFile.absolutePath}"
     }
-    cmd += bootPatchFlags(allowShell, enableAdb, forceBackup, blockModules)
-
-    cmd += " --spoof-release ${spoofRelease.trim().shellArg()}"
-    cmd += " --spoof-version ${spoofVersion.trim().shellArg()}"
-
     if (ota) {
         cmd += " -u"
     }
 
-    val lkmFile = writeLkmFile(lkm)
-    if (lkmFile != null) {
-        cmd += " -m ${lkmFile.absolutePath}"
-    } else if (lkm is LkmSelection.KmiString) {
-        cmd += " --kmi ${lkm.value}"
+    var lkmFile: File? = null
+    if (!useVendorBootRmvr) {
+        cmd += bootPatchFlags(allowShell, enableAdb, forceBackup, blockModules)
+        cmd += " --spoof-release ${spoofRelease.trim().shellArg()}"
+        cmd += " --spoof-version ${spoofVersion.trim().shellArg()}"
+
+        lkmFile = writeLkmFile(lkm)
+        if (lkmFile != null) {
+            cmd += " -m ${lkmFile.absolutePath}"
+        } else if (lkm is LkmSelection.KmiString) {
+            cmd += " --kmi ${lkm.value}"
+        }
     }
 
     if (bootFile != null) {
@@ -683,30 +695,48 @@ fun installBoot(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val destination = outputDir ?: downloadsDir
         cmd += " -o ${destination.absolutePath.shellArg()}"
-        if (outputDir != null) cmd += " --out-name lkm-patched.img"
+        if (outputDir != null) {
+            cmd += " --out-name lkm-patched.img"
+        } else {
+            val outputKind = resolveBootImageKindForOutput(bootImageKind, partition)
+            val outputName = if (outputKind == null) {
+                "kernelsu_patched_${System.currentTimeMillis()}.img"
+            } else {
+                "kernelsu_patched_${outputKind}_${System.currentTimeMillis()}.img"
+            }
+            cmd += " --out-name $outputName"
+        }
     }
 
     partition?.let { part ->
         cmd += " --partition $part"
     }
 
-    val result = flashWithIO("${getKsuDaemonPath()} $cmd", onStdout, onStderr)
+    var rmvrChanged = false
+    val stdout: (String) -> Unit = { line ->
+        if (useVendorBootRmvr && line.contains("KERNELSU_RMVR_CHANGED=1")) {
+            rmvrChanged = true
+        }
+        onStdout(line)
+    }
+    val result = flashWithIO("${getKsuDaemonPath()} $cmd", stdout, onStderr)
     Log.i("KernelSU", "install boot result: ${result.isSuccess}")
 
     bootFile?.delete()
     lkmFile?.delete()
 
     // if boot uri is empty, it is direct install, when success, we should show reboot button
-    val showReboot = bootUri == null && result.isSuccess // we create a temporary val here, to avoid calc showReboot double
-    if (showReboot) { // because we decide do not update ksud when startActivity
-        install() // install ksud here
+    val showReboot = bootUri == null && result.isSuccess &&
+        (!useVendorBootRmvr || !ota && rmvrChanged)
+    if (bootUri == null && result.isSuccess && !useVendorBootRmvr) {
+        install()
     }
     return FlashResult(result.code, result.err.joinToString("\n"), showReboot,
         outputDir?.let { File(it, "lkm-patched.img") }?.takeIf { result.isSuccess })
 }
 
 private fun installBootWithKpm(
-    bootUri: Uri?, lkm: LkmSelection, ota: Boolean, partition: String?,
+    bootUri: Uri?, lkm: LkmSelection, ota: Boolean, partition: String?, bootImageKind: String?,
     allowShell: Boolean, enableAdb: Boolean, forceBackup: Boolean, blockModules: String,
     spoofRelease: String, spoofVersion: String, kpmBoot: Uri?,
     onStdout: (String) -> Unit, onStderr: (String) -> Unit,
@@ -718,44 +748,38 @@ private fun installBootWithKpm(
     }
     if (bootUri == null) {
         if (ota) return FlashResult(1, "Combined KPM installation to the inactive slot is not supported yet; no changes made", false)
-        // Do not discover an invalid manual boot only after updating LKM.
-        if (kpmBoot != null) {
-            try {
-                val header = ByteArray(64)
-                val input = ksuApp.contentResolver.openInputStream(kpmBoot)
-                    ?: error("Cannot open the selected boot.img")
-                input.use { java.io.DataInputStream(it).readFully(header) }
-                check(String(header, 0, 8, Charsets.US_ASCII) == "ANDROID!" &&
-                    ByteBuffer.wrap(header).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(8) > 0) {
-                    "Select boot.img containing a kernel, not init_boot.img"
-                }
-            } catch (e: Exception) {
-                return FlashResult(1, e.message ?: "Cannot read manual boot.img", false)
+    }
+    // Validate the actual KPM input before LKM can modify the device.
+    val kpmImage = kpmBoot ?: bootUri
+    if (kpmImage != null) {
+        try {
+            val header = ByteArray(64)
+            val input = ksuApp.contentResolver.openInputStream(kpmImage)
+                ?: error("Cannot open the selected boot.img")
+            input.use { java.io.DataInputStream(it).readFully(header) }
+            check(String(header, 0, 8, Charsets.US_ASCII) == "ANDROID!" &&
+                ByteBuffer.wrap(header).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(8) > 0) {
+                "Selected image has no boot kernel. Select the matching boot.img for KPM."
             }
+        } catch (e: Exception) {
+            return FlashResult(1, e.message ?: "Cannot read selected boot.img", false)
         }
-        val lkmResult = installBoot(null, lkm, false, partition, allowShell, enableAdb, forceBackup,
+    }
+    if (bootUri == null) {
+        val lkmResult = installBoot(null, lkm, false, partition, bootImageKind, allowShell, enableAdb, forceBackup,
             blockModules, spoofRelease, spoofVersion, onStdout, onStderr, kpmEnabled = false)
         if (failIfNeeded(lkmResult)) return lkmResult
         onStdout("- LKM installation completed. Starting additional KPM operation.")
         if (kpmBoot != null) onStdout("- Manual boot selected: KPM output will be exported, not flashed to the device.")
         val result = patchKpmBoot(kpmBoot, onStdout, onStderr, undo = kpmUndo)
-        return result.copy(showReboot = result.code == 0 && lkmResult.showReboot)
+        return result.copy(
+            showReboot = result.code == 0 && (lkmResult.showReboot || result.showReboot)
+        )
     }
     val work = File.createTempFile("lkm-kpm-", ".dir", ksuApp.cacheDir)
     check(work.delete() && work.mkdirs()) { "Cannot create combined patch directory" }
     return try {
-        if (kpmBoot == null) {
-            val header = ByteArray(64)
-            val count = ksuApp.contentResolver.openInputStream(bootUri)?.use { input ->
-                java.io.DataInputStream(input).readFully(header)
-                header.size
-            } ?: 0
-            check(count == header.size && String(header, 0, 8, Charsets.US_ASCII) == "ANDROID!" &&
-                ByteBuffer.wrap(header).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(8) > 0) {
-                "Selected image has no boot kernel. Expand manual boot selection and choose the matching boot.img."
-            }
-        }
-        val lkmResult = installBoot(bootUri, lkm, ota, partition, allowShell, enableAdb, forceBackup,
+        val lkmResult = installBoot(bootUri, lkm, ota, partition, bootImageKind, allowShell, enableAdb, forceBackup,
             blockModules, spoofRelease, spoofVersion, onStdout, onStderr,
             kpmEnabled = false, outputDir = work)
         if (failIfNeeded(lkmResult)) return lkmResult
@@ -804,6 +828,7 @@ fun downloadBoot(
     kpmBoot: Uri? = null,
 ): FlashResult {
     val bootFile = File(ksuApp.cacheDir, "download-boot.img")
+    val useVendorBootRmvr = isVendorBootTarget(null, partition)
     var probedKmi: String?
     try {
         onStdout("- Downloading and extracting boot image")
@@ -817,13 +842,13 @@ fun downloadBoot(
             if (magic == "CrAU") {
                 ExtractImage.probePayload(
                     probeChannel,
-                    withKmi = lkm is LkmSelection.KmiNone,
+                    withKmi = !useVendorBootRmvr && lkm is LkmSelection.KmiNone,
                     onProgress = onStdout,
                 ).kmi
             } else {
                 ExtractImage.probe(
                     probeChannel,
-                    withKmi = lkm is LkmSelection.KmiNone,
+                    withKmi = !useVendorBootRmvr && lkm is LkmSelection.KmiNone,
                     onProgress = onStdout,
                 ).kmi
             }
@@ -838,17 +863,18 @@ fun downloadBoot(
         return FlashResult(-1, e.message ?: "Download failed", false)
     }
 
-    // init_boot/vendor_boot carry no kernel, so their KMI comes from the
-    // payload's boot probe and must be passed explicitly. A remote download
-    // is unrelated to this device, so ksud must not use the local kernel.
-    val autoKmi = if (lkm is LkmSelection.KmiNone) {
+    if (useVendorBootRmvr && lkm != LkmSelection.KmiNone) {
+        onStdout(ksuApp.getString(R.string.vendor_boot_rmvr_lkm_not_used))
+    }
+
+    val autoKmi = if (!useVendorBootRmvr && lkm is LkmSelection.KmiNone) {
         (probedKmi ?: BootKernelVersion.parseKmiFromBoot(bootFile))?.also {
             onStdout("- Auto detected KMI: $it")
         }
     } else {
         null
     }
-    if (autoKmi == null && lkm is LkmSelection.KmiNone) {
+    if (!useVendorBootRmvr && autoKmi == null && lkm is LkmSelection.KmiNone) {
         bootFile.delete()
         return FlashResult(-1, "Failed to determine KMI from the package", false)
     }
@@ -867,7 +893,7 @@ fun downloadBoot(
             }
             try {
                 val resolvedLkm = autoKmi?.let { LkmSelection.KmiString(it) } ?: lkm
-                return installBootWithKpm(Uri.fromFile(bootFile), resolvedLkm, false, partition,
+                return installBootWithKpm(Uri.fromFile(bootFile), resolvedLkm, false, partition, partition,
                     allowShell, enableAdb, forceBackup, blockModules, spoofRelease, spoofVersion,
                     selectedBoot, onStdout, onStderr, kpmUndo)
             } finally {
@@ -880,24 +906,31 @@ fun downloadBoot(
         }
     }
 
-    var cmd = "${getKsuDaemonPath()} boot-patch -b ${bootFile.absolutePath}"
-    cmd += bootPatchFlags(allowShell, enableAdb, forceBackup, blockModules)
+    val patchCommand = if (useVendorBootRmvr) VENDOR_BOOT_RMVR_COMMAND else BOOT_PATCH_COMMAND
+    var cmd = "${getKsuDaemonPath()} $patchCommand -b ${bootFile.absolutePath}"
+    var lkmFile: File? = null
+    if (!useVendorBootRmvr) {
+        cmd += bootPatchFlags(allowShell, enableAdb, forceBackup, blockModules)
+        cmd += " --spoof-release ${spoofRelease.trim().shellArg()}"
+        cmd += " --spoof-version ${spoofVersion.trim().shellArg()}"
 
-    cmd += " --spoof-release ${spoofRelease.trim().shellArg()}"
-    cmd += " --spoof-version ${spoofVersion.trim().shellArg()}"
-
-    val lkmFile = writeLkmFile(lkm)
-    if (lkmFile != null) {
-        cmd += " -m ${lkmFile.absolutePath}"
-    } else if (lkm is LkmSelection.KmiString) {
-        cmd += " --kmi ${lkm.value}"
+        lkmFile = writeLkmFile(lkm)
+        if (lkmFile != null) {
+            cmd += " -m ${lkmFile.absolutePath}"
+        } else if (lkm is LkmSelection.KmiString) {
+            cmd += " --kmi ${lkm.value}"
+        }
+        if (autoKmi != null) cmd += " --kmi $autoKmi"
     }
-    if (autoKmi != null) cmd += " --kmi $autoKmi"
     cmd += " --partition $partition"
     // ksud defaults to cwd, which is read-only in the su session; use Downloads.
     val downloadsDir =
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-    cmd += " -o $downloadsDir"
+    cmd += " -o ${downloadsDir.absolutePath.shellArg()}"
+    val outputKind = resolveBootImageKindForOutput(null, partition)
+    if (outputKind != null) {
+        cmd += " --out-name kernelsu_patched_${outputKind}_${System.currentTimeMillis()}.img"
+    }
 
     val stdoutCallback: CallbackList<String?> = object : CallbackList<String?>() {
         override fun onAddElement(s: String?) {
@@ -981,6 +1014,25 @@ suspend fun getSupportedKmis(): List<String> = withContext(Dispatchers.IO) {
     out.filter { it.isNotBlank() }.map { it.trim() }
 }
 
+suspend fun classifyBootImage(uri: Uri?): String = withContext(Dispatchers.IO) {
+    if (uri == null) return@withContext BOOT_IMAGE_KIND_UNKNOWN
+    detectBootImageKindByName(uri.getFileName(ksuApp))?.let { return@withContext it }
+
+    val resolver = ksuApp.contentResolver
+    val image = File(ksuApp.cacheDir, "boot-classify.img")
+    try {
+        resolver.openInputStream(uri)?.use { input ->
+            image.outputStream().use { output -> input.copyTo(output) }
+        } ?: return@withContext BOOT_IMAGE_KIND_UNKNOWN
+
+        val shell = getRootShell()
+        val cmd = "boot-info classify-image ${image.absolutePath}"
+        ShellUtils.fastCmd(shell, "${getKsuDaemonPath()} $cmd").trim().ifBlank { BOOT_IMAGE_KIND_UNKNOWN }
+    } finally {
+        image.delete()
+    }
+}
+
 suspend fun isAbDevice(): Boolean = withContext(Dispatchers.IO) {
     val shell = getRootShell()
     val cmd = "boot-info is-ab-device"
@@ -993,7 +1045,7 @@ suspend fun getDefaultPartition(): String = withContext(Dispatchers.IO) {
         val cmd = "boot-info default-partition"
         ShellUtils.fastCmd(shell, "${getKsuDaemonPath()} $cmd").trim()
     } else {
-        if (!Os.uname().release.contains("android12-")) "init_boot" else "boot"
+        if (!Os.uname().release.contains("android12-")) BOOT_IMAGE_KIND_INIT_BOOT else BOOT_IMAGE_KIND_BOOT
     }
 }
 
