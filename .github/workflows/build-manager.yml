@@ -58,6 +58,7 @@ on:
 jobs:
 
   generate-key:
+    if: always()
     runs-on: ubuntu-latest
 
     outputs:
@@ -69,7 +70,7 @@ jobs:
 
     steps:
       - name: Generate temporary keystore
-        if: github.event_name == 'pull_request'
+        if: always()
         id: gen
         run: |
           KEYSTORE_PASSWORD=$(openssl rand -hex 32)
@@ -92,7 +93,7 @@ jobs:
           echo "keystore=$(base64 -w 0 pr-key.jks)" >> $GITHUB_OUTPUT
 
       - name: Extract certificate hash and size
-        if: github.event_name == 'pull_request'
+        if: always()
         id: extract
         env:
           STORE_PASS: ${{ steps.gen.outputs.keystore_password }}
@@ -292,7 +293,7 @@ jobs:
 
 
       - name: Write PR key
-        if: github.event_name == 'pull_request'
+        if: always()
 
         env:
           PR_KEYSTORE: ${{ needs.generate-key.outputs.keystore }}
@@ -300,6 +301,13 @@ jobs:
           PR_KEY_PASSWORD: ${{ needs.generate-key.outputs.key_password }}
 
         run: |
+          # 只有仓库没有配置正式签名密钥时才使用临时密钥
+          if [ -n "${{ secrets.KEYSTORE }}" ]; then
+            echo "正式 keystore 已配置，跳过临时密钥"
+            exit 0
+          fi
+
+          test -n "$PR_KEYSTORE"
           echo "$PR_KEYSTORE" | base64 -d > pr-key.jks
 
           {
@@ -654,8 +662,9 @@ jobs:
           PROD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ -z "$PROD_KEYSTORE" ]; then
 
+            test -n "$PR_KEYSTORE"
             echo "$PR_KEYSTORE" | base64 -d > pr-key.jks
 
             echo "SIGN_KEYSTORE_FILE=pr-key.jks" >> "$GITHUB_ENV"
